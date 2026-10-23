@@ -1,0 +1,14 @@
+# Secrets and personal data stay local.
+.env
+data/
+dsh-home/
+agent/me.md
+agent/commands/
+agent/tools/*
+!agent/tools/btc_price.mjs
+# Third-party checkout and generated files.
+vendor/
+plugins/node_modules/
+bench/*.jsonl
+bench/web-default.yml
+.DS_Store

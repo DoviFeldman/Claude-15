@@ -1,0 +1,9 @@
+services:
+  groqbot:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./agent:/app/agent
+      - ./data:/app/data
+      - ./dsh-home:/app/dsh-home
