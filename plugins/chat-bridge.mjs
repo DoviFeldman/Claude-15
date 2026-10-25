@@ -241,6 +241,7 @@ export function apply(ctx) {
   }).then((r) => r.json())
 
   async function deliver(chat, msg) {
+    msg = msg.replace(/\*\*(.+?)\*\*/g, '$1') // Telegram plain text would show the asterisks
     if (chat.startsWith('tg:') && token) {
       for (let i = 0; i < msg.length; i += 4000) await tg('sendMessage', { chat_id: chat.slice(3), text: msg.slice(i, i + 4000) })
     } else {

@@ -66,16 +66,30 @@ async function webSearch({ query }) {
   return out.join('\n').slice(0, 2500) || 'No results.'
 }
 
+// Straight-line miles between two lat/lon points.
+function miles(a, b) {
+  const r = (d) => (d * Math.PI) / 180
+  const h = Math.sin(r(b.lat - a.lat) / 2) ** 2 + Math.cos(r(a.lat)) * Math.cos(r(b.lat)) * Math.sin(r(b.lon - a.lon) / 2) ** 2
+  return 7918 * Math.asin(Math.sqrt(h))
+}
+
 async function places({ query, near }) {
   const where = near || HOME
-  const d = await serper('places', { q: `${query} near ${where}`, gl: 'us' })
+  const c = await geocode(where)
+  // Serper /maps (not /places) is the endpoint that returns opening hours.
+  const d = await serper('maps', { q: query, ll: `@${c.lat},${c.lon},12z` })
   if (d) {
-    return (d.places ?? []).slice(0, 5).map((p) =>
-      `- ${p.title} | ${p.address ?? ''} | ${p.rating ?? '?'}★ | ${p.openingHours ? JSON.stringify(p.openingHours) : (p.hours ?? 'hours n/a')} | ${p.phoneNumber ?? ''}`
-    ).join('\n') || 'No places found.'
+    const day = new Date().toLocaleString('en-US', { timeZone: TZ, weekday: 'long' })
+    const rows = (d.places ?? []).slice(0, 5).map((p) => ({
+      ...p, mi: p.latitude ? miles(c, { lat: p.latitude, lon: p.longitude }) : undefined,
+    })).sort((a, b) => (a.mi ?? 99) - (b.mi ?? 99))
+    return rows.map((p) => [
+      `- ${p.title}`, p.address, p.mi !== undefined ? `${p.mi.toFixed(1)} mi` : '',
+      p.openingHours ? `today (${day}) ${p.openingHours[day]?.replace(/ /g, ' ') ?? 'n/a'}` : 'hours n/a',
+      p.rating ? `${p.rating}★ (${p.ratingCount})` : '', p.type ?? '', p.phoneNumber ?? '',
+    ].filter(Boolean).join(' | ')).join('\n') + `\n(nearest first; straight-line distance from ${near ? where : 'home'})` || 'No places found.'
   }
   // Fallback without Serper: OpenStreetMap, which often has opening_hours.
-  const c = await geocode(where)
   const box = [c.lon - 0.12, c.lat + 0.09, c.lon + 0.12, c.lat - 0.09].join(',')
   const r = await getJson(`https://nominatim.openstreetmap.org/search?format=jsonv2&limit=6&extratags=1&bounded=1&viewbox=${box}&q=${encodeURIComponent(query)}`)
   if (!r.length) return 'No places found.'
