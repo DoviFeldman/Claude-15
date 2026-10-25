@@ -27,5 +27,16 @@ Make your own: `/cmd weekend weekend weather and one fun thing to do {args}` -> 
     cp agent/me.example.md agent/me.md
     docker compose up -d --build
 
+Without the compose plugin (plain Docker):
+
+    docker build -t groqbot .
+    docker run -d --name groqbot --restart unless-stopped \
+      -v $PWD/.env:/app/.env:ro -v $PWD/agent:/app/agent \
+      -v $PWD/data:/app/data -v $PWD/dsh-home:/app/dsh-home groqbot
+    docker logs -f groqbot      # watch it
+    docker restart groqbot      # after editing prompt.md / plugins
+
+Only run one copy per Telegram token (two pollers fight over updates).
+
 Telegram: create a bot with @BotFather, put its token in `TELEGRAM_BOT_TOKEN`, message the bot once,
 it replies with your chat id -> put it in `TELEGRAM_ALLOWED_CHAT_IDS`, restart. `/new` starts a fresh chat.
