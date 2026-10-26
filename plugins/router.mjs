@@ -99,5 +99,6 @@ export async function filterResults(query, results, keep = 3) {
   if (!d) return { results: results.slice(0, keep), by: 'order' }
   const ranked = results.map((r, i) => [r, d.p[`r${i}`] ?? 0]).sort((a, b) => b[1] - a[1])
   const good = ranked.filter(([, p]) => p >= 0.5).slice(0, keep)
-  return { results: (good.length ? good : ranked.slice(0, 1)).map(([r]) => r), by: d.model }
+  // Keep at least 2: with a single snippet Qwen tends to embellish the gaps.
+  return { results: (good.length >= 2 ? good : ranked.slice(0, Math.min(2, keep))).map(([r]) => r), by: d.model }
 }
