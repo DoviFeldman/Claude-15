@@ -8,6 +8,7 @@ const cases = [
   ['will it rain tomorrow?', ['weather']], ['who was the first president of the US?', []], ['how long to drive to Philly?', ['places']],
   ['best noise cancelling headphones under $200', ['web']], ['what notes do I have?', ['reminders']], ['is it jacket weather tonight?', ['weather']],
   ['start a fresh chat after 2 hours of quiet', ['self']], ['did the Brewers win last night?', ['web']], ['any pizza open late near me?', ['places']],
+  ['what reminders do I have?', ['reminders']], ['which stores sell AA batteries around here?', ['places']], ['any restaurants open now?', ['places']],
 ]
 const kw = (await import('../plugins/router.mjs'))
 let okM = 0, okK = 0, ms = []

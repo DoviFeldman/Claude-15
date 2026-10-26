@@ -1,0 +1,9 @@
+# Build only needs plugins/, config/, run.sh. Keep secrets and runtime data out of the image context.
+.env
+data/
+dsh-home/
+agent/
+bench/
+vendor/
+.git/
+plugins/node_modules/

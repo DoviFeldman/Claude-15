@@ -10,12 +10,13 @@ export const PACKS = {
   self: 'changing the bot itself: its prompt, settings, commands, tools, code, files, or facts about the user',
 }
 
+// Plurals (reminders, stores) match via the trailing (?:s|es)?.
 const KEYWORDS = {
-  places: /\b(store|shop|restaurant|cafe|coffee|dunkin|starbucks|target|walmart|uniqlo|mall|open|close[sd]?|hours|near(by| me)?|closest|nearest|address|street|far|distance|drive|driving|walk|bike|miles?|minutes? away|get to|directions|pharmacy|gas|grocery|pizza|dinner|lunch|breakfast|food|eat|bakery|bagel|sushi)\b/i,
-  web: /(\$\d)|\b(best|top|under|price|cost|how much|buy|cheapest|least|news|score|game|win|won|beat|last night|yesterday|today's|tonight's|who is|what is the|latest|release|specs?|range|battery|review|vs\.?|compare|stock|company|invest|minimum|website|search|google|look up)\b/i,
-  weather: /\b(weather|rain|snow|temperature|temp|cold|hot|warm|forecast|wind|humid|storm|sunny|cloudy|sunset|sunrise|umbrella|jacket)\b/i,
-  reminders: /\b(remind|reminder|alarm|schedule|every (day|week|morning|night)|everyday|tomorrow at|note|notes|remember|forget|wrote down|todo|to-do)\b/i,
-  self: /\b(edit yourself|change your|update your|commands?|menu|your (prompt|settings?|commands?|tools?|code|files?)|fresh chat|idle|make (a|yourself a) (tool|command)|build (a|yourself a) tool|setting|\/cmd|harness|plugin|restart)\b/i,
+  places: /\b(store|shop|restaurant|cafe|coffee|dunkin|starbucks|target|walmart|uniqlo|mall|open|close[sd]?|hours|near(by| me)?|closest|nearest|address|street|far|distance|drive|driving|walk|bike|miles?|minutes? away|get to|directions|pharmacy|gas|grocery|pizza|dinner|lunch|breakfast|food|eat|bakery|bagel|sushi)(?:s|es)?\b/i,
+  web: /(\$\d)|\b(best|top|under|price|cost|how much|buy|cheapest|least|news|score|game|win|won|beat|last night|yesterday|today's|tonight's|who is|what is the|latest|release|specs?|range|battery|review|vs\.?|compare|stock|company|invest|minimum|website|search|google|look up)(?:s|es)?\b/i,
+  weather: /\b(weather|rain|snow|temperature|temp|cold|hot|warm|forecast|wind|humid|storm|sunny|cloudy|sunset|sunrise|umbrella|jacket)(?:s|es)?\b/i,
+  reminders: /\b(remind|reminder|alarm|schedule|every (day|week|morning|night)|everyday|tomorrow at|note|notes|remember|forget|wrote down|todo|to-do)(?:s|es)?\b/i,
+  self: /\b(edit yourself|change your|update your|commands?|menu|your (prompt|settings?|commands?|tools?|code|files?)|fresh chat|idle|make (a|yourself a) (tool|command)|build (a|yourself a) tool|setting|\/cmd|harness|plugin|restart)(?:s|es)?\b/i,
 }
 
 function keywordRoute(text) {
