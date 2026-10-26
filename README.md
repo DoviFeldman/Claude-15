@@ -6,8 +6,16 @@ Groq model: `qwen/qwen3.8-27b` (only). Runs as a custom `dsh` profile (`groqbot`
 - `plugins/chat-bridge.mjs` (host plugin): Telegram long-polling + `POST 127.0.0.1:3999/chat {"text","chat"}` for local tests. One session per chat, rotated after 30 min idle or a heavy turn; reminders are pushed to the chat; turns capped at 6 steps.
 - `config/groqbot.yml`: Groq route, retry policy for the free-tier TPM limit, `groqbot` preset (replaces DeepSeek's whole prompt).
 
+## Topic packs + router (token saver)
+Each message is routed (`plugins/router.mjs`) to the packs it needs: `places`, `web`, `weather`, `reminders`, `self`
+(+ `core`, always). Only those packs' instructions (`agent/packs/<pack>.md`) and tools are shown to the model, and
+user facts ride along only with packs that use them. Routing is keyword-based by default (free, instant); set
+`DECISION_MODEL=typesafe-ai/jev` (needs paid Vercel AI Gateway credits) or `TYPESAFE_API_KEY` to add Jev, which is
+unioned with the keywords. Jev also filters Serper results down to the relevant few (fallback: top 3).
+`node bench/router.bench.mjs <model>` grades a decision model against keywords.
+
 ## Chat commands
-`/new` fresh chat · `/continue` back to the previous chat · `/retry` last question in a fresh chat · `/usage` tokens of last answer · `/help` · `/commands`.
+`/continue` back to the previous chat · `/retry` last question in a fresh chat · `/usage` tokens of last answer · `/help` · `/commands` · `/new` fresh chat (kept last in the menu).
 Make your own: `/cmd weekend weekend weather and one fun thing to do {args}` -> `/weekend with kids`. Delete: `/cmd weekend`. Stored in `agent/commands/<name>.md`.
 
 ## Personal setup (not in git)

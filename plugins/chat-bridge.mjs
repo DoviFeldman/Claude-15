@@ -6,6 +6,7 @@ import { createServer } from 'node:http'
 import { readFileSync, writeFileSync, appendFileSync, readdirSync, mkdirSync, existsSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { route } from './router.mjs'
 
 export const name = 'chat-bridge'
 export const inject = ['sessionController', 'agents', 'sessions']
@@ -117,9 +118,34 @@ export function apply(ctx) {
     }
   })
 
+  // Show the model only the packs this message needs: deny every other pack's
+  // tools for this agent and swap in a prompt built from just those packs.
+  const routed = new Map() // agent id -> disposer of the current restriction
+  const ALWAYS_HIDDEN = ['working_directory']
+  async function applyRoute(agent, textIn) {
+    const g = globalThis.groqbot
+    if (!g) return undefined
+    const r = await route(textIn)
+    routed.get(agent.id)?.()
+    const keep = new Set(['core', ...r.packs])
+    const deny = [...ALWAYS_HIDDEN, ...[...g.packOf].filter(([, p]) => !keep.has(p)).map(([n]) => n)]
+    const disposers = []
+    try {
+      disposers.push(agent.ctx.tools.restrict({ deny }))
+    } catch (e) {
+      // A name the agent cannot see (e.g. tool not loaded yet) — retry without it.
+      const known = deny.filter((n) => !String(e.message).includes(`"${n}"`))
+      if (known.length) disposers.push(agent.ctx.tools.restrict({ deny: known }))
+    }
+    disposers.push(agent.ctx.systemPrompt.variable('groqbot_prompt', () => g.composePrompt(r.packs)))
+    routed.set(agent.id, () => disposers.forEach((d) => d()))
+    return r
+  }
+
   async function ask(chat, textIn) {
     const agent = await agentFor(chat)
     await agent.whenIdle()
+    const routeInfo = await applyRoute(agent, textIn).catch((e) => ({ error: e.message }))
     const from = agent.session.seq
     busy.add(agent.id)
     const t = Date.now()
@@ -136,7 +162,7 @@ export function apply(ctx) {
     const reply = lastText(agent.session, from)
     return {
       reply: stats?.capped ? `${reply ? `${reply}\n` : ''}(Stopped after ${maxSteps()} steps — try rephrasing or a simpler ask.)` : reply || '(no reply)',
-      ms: Date.now() - t, stats,
+      ms: Date.now() - t, stats: { ...stats, route: routeInfo },
     }
   }
 
@@ -148,15 +174,17 @@ export function apply(ctx) {
   const prevSession = {}
   const lastQuestion = {}
   const save = () => writeFileSync(MAP_FILE, JSON.stringify(chats, null, 1))
+  // Menu order = this order, custom commands after; /new is kept last.
   const BUILTIN = {
     help: 'list commands',
-    new: 'start a fresh conversation',
     continue: 'go back to the conversation before the last /new',
     retry: 'ask your last question again in a fresh conversation',
     usage: 'tokens and time of the last answer',
     commands: 'list your custom commands',
     cmd: '/cmd name prompt with {args} = make a command; /cmd name = delete it',
   }
+  const NEW_CMD = ['new', 'start a fresh conversation']
+  const menu = () => [...Object.entries(BUILTIN), ...Object.entries(customCommands()).map(([k, v]) => [k, v.desc]), NEW_CMD]
   const customCommands = () => Object.fromEntries(readdirSync(CMD_DIR).filter((f) => f.endsWith('.md')).map((f) => {
     const body = readFileSync(join(CMD_DIR, f), 'utf8')
     const desc = body.match(/^#\s*(.+)/)?.[1] ?? 'custom command'
@@ -180,7 +208,7 @@ export function apply(ctx) {
     switch (cmd) {
       case 'start':
       case 'help':
-        return { reply: [...Object.entries(BUILTIN), ...Object.entries(custom).map(([k, v]) => [k, v.desc])].map(([k, v]) => `/${k} — ${v}`).join('\n') }
+        return { reply: menu().map(([k, v]) => `/${k} — ${v}`).join('\n') }
       case 'new':
         forget(chat)
         return { reply: 'Fresh conversation started.' }
@@ -207,7 +235,7 @@ export function apply(ctx) {
       case 'cmd': {
         const [, cname, template] = args.match(/^([a-z0-9_]+)\s*([\s\S]*)$/i) ?? []
         if (!cname) return { reply: BUILTIN.cmd }
-        if (BUILTIN[cname.toLowerCase()]) return { reply: `/${cname} is built in.` }
+        if (BUILTIN[cname.toLowerCase()] || cname.toLowerCase() === 'new') return { reply: `/${cname} is built in.` }
         const file = join(CMD_DIR, `${cname.toLowerCase()}.md`)
         if (!template) {
           if (!existsSync(file)) return { reply: `No /${cname}.` }
@@ -228,12 +256,12 @@ export function apply(ctx) {
   }
 
   // ---- Telegram ----
-  const token = process.env.TELEGRAM_BOT_TOKEN
+  // GROQBOT_NO_TELEGRAM=1 lets a second copy (e.g. testing on the Mac) run without stealing the bot's updates.
+  const token = process.env.GROQBOT_NO_TELEGRAM ? '' : process.env.TELEGRAM_BOT_TOKEN
   // Show built-in + custom commands in Telegram's "/" menu.
   function syncTelegramMenu() {
     if (!token) return
-    const all = [...Object.entries(BUILTIN), ...Object.entries(customCommands()).map(([k, v]) => [k, v.desc])]
-    tg('setMyCommands', { commands: all.slice(0, 100).map(([command, description]) => ({ command, description: description.slice(0, 256) })) }).catch(() => {})
+    tg('setMyCommands', { commands: menu().slice(-100).map(([command, description]) => ({ command, description: description.slice(0, 256) })) }).catch(() => {})
   }
   const allowed = (process.env.TELEGRAM_ALLOWED_CHAT_IDS ?? '').split(',').map((s) => s.trim()).filter(Boolean)
   const tg = (method, body) => fetch(`https://api.telegram.org/bot${token}/${method}`, {

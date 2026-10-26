@@ -6,6 +6,9 @@ import { pathToFileURL } from 'node:url'
 import { execFile } from 'node:child_process'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { parseWhen } from './when.mjs'
+import { filterResults, PACKS } from './router.mjs'
+
+const PACK_NAMES = Object.keys(PACKS)
 
 export const name = 'groqbot-tools'
 export const inject = ['tools', 'systemPrompt']
@@ -56,14 +59,19 @@ async function serper(path, body) {
     method: 'POST', headers: { 'X-API-KEY': key, 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
 }
 
+// Every result line is re-sent to the model on each later step, so only the
+// few that answer the question are kept (Jev picks them; fallback = top 3).
 async function webSearch({ query }) {
-  const d = await serper('search', { q: query, gl: 'us', num: 6 })
+  const d = await serper('search', { q: query, gl: 'us', num: 8 })
   if (!d) return 'Search unavailable: SERPER_API_KEY not set.'
   const out = []
   if (d.answerBox) out.push(`Answer: ${d.answerBox.answer ?? d.answerBox.snippet ?? ''}`)
-  if (d.knowledgeGraph?.description) out.push(`KG: ${d.knowledgeGraph.title}: ${d.knowledgeGraph.description}`)
-  for (const r of (d.organic ?? []).slice(0, 5)) out.push(`- ${r.title}: ${r.snippet ?? ''} (${r.link})`)
-  return out.join('\n').slice(0, 2500) || 'No results.'
+  if (d.knowledgeGraph?.description) out.push(`${d.knowledgeGraph.title}: ${d.knowledgeGraph.description}`)
+  const candidates = [...(d.organic ?? []), ...(d.peopleAlsoAsk ?? []).map((q) => ({ title: q.question, snippet: q.snippet, link: q.link }))]
+    .map((r) => `${r.title}: ${(r.snippet ?? '').slice(0, 260)} (${new URL(r.link ?? 'https://x').hostname.replace(/^www\./, '')})`)
+  const { results } = await filterResults(query, candidates, out.length ? 2 : 3)
+  out.push(...results.map((r) => `- ${r}`))
+  return out.join('\n') || 'No results.'
 }
 
 // Straight-line miles between two lat/lon points.
@@ -77,7 +85,12 @@ async function places({ query, near }) {
   const where = near || HOME
   const c = await geocode(where)
   // Serper /maps (not /places) is the endpoint that returns opening hours.
-  const d = await serper('maps', { q: query, ll: `@${c.lat},${c.lon},12z` })
+  // Start local; widen the map if nothing is around (e.g. the nearest Uniqlo is a county away).
+  let d
+  for (const zoom of [12, 10, 8]) {
+    d = await serper('maps', { q: query, ll: `@${c.lat},${c.lon},${zoom}z` })
+    if (!d || (d.places ?? []).length) break
+  }
   if (d) {
     const day = new Date().toLocaleString('en-US', { timeZone: TZ, weekday: 'long' })
     const rows = (d.places ?? []).slice(0, 5).map((p) => ({
@@ -157,6 +170,7 @@ async function loadCustomTool(ctx, file, loaded) {
   const mod = await import(`${pathToFileURL(file).href}?v=${Date.now()}`)
   const toolName = file.split('/').pop().replace(/\.mjs$/, '')
   loaded.get(toolName)?.()
+  packOf.set(toolName, mod.pack ?? 'web')
   loaded.set(toolName, ctx.tools.register(defineTool({
     name: toolName,
     description: mod.description,
@@ -254,27 +268,44 @@ function settings({ name: key, value }) {
   return `${key} set to ${n}.`
 }
 
-export async function apply(ctx) {
-  // Prompt comes from editable files, re-read every step, so the agent can rewrite itself.
-  ctx.systemPrompt.variable('groqbot_prompt', () =>
-    `${read(join(AGENT, 'prompt.md'))}\n${read(join(AGENT, 'me.md'))}\nNow: ${nowLocal()} (${TZ}).`.replaceAll('{{', '{ {'))
+// ---- Topic packs ----
+// Each pack = agent/packs/<pack>.md + the tools tagged with it. The chat bridge
+// asks the router which packs a message needs, then shows the model only those
+// (core is always on). User facts ride along only with packs that use them.
+const PACK_DIR = join(AGENT, 'packs')
+const NEEDS_ME = new Set(['places', 'weather', 'reminders', 'self'])
+export const packOf = new Map() // tool name -> pack
 
-  const reg = (def) => ctx.tools.register(defineTool({ output: text, ...def }))
+export function composePrompt(packs) {
+  const all = packs ?? ['places', 'web', 'weather', 'reminders', 'self']
+  const parts = ['core', ...all].map((p) => read(join(PACK_DIR, `${p}.md`)).trim()).filter(Boolean)
+  if (all.some((p) => NEEDS_ME.has(p))) parts.push(read(join(AGENT, 'me.md')).trim())
+  parts.push(`Now: ${nowLocal()} (${TZ}).`)
+  return parts.join('\n').replaceAll('{{', '{ {')
+}
+
+export async function apply(ctx) {
+  // Full prompt is the fallback for turns the bridge did not route (e.g. Web UI).
+  ctx.systemPrompt.variable('groqbot_prompt', () => composePrompt())
+  globalThis.groqbot = { packOf, composePrompt }
+
+  const reg = (def, pack) => { packOf.set(def.name, pack); return ctx.tools.register(defineTool({ output: text, ...def })) }
   reg({
     name: 'settings', description: 'View/change bot settings. No args = list. name: idle_minutes|max_steps, value: number.',
     parameters: { name: { type: 'string' }, value: { type: 'number' } }, execute: settings,
-  })
+  }, 'self')
   reg({
     name: 'calc',
     description: 'Exact math and time math. JS expression; Math.* available, plus untilTime("6:04 PM") -> "3h 12m", daysUntil("2026-12-25"), now().',
     parameters: { expression: { type: 'string', required: true } },
     execute: ({ expression }) => calc(expression),
-  })
+  }, 'core')
   reg({
     name: 'shell', description: `Run a bash command in ${ROOT} (60s limit). For files, installs, editing yourself.`,
     parameters: { command: { type: 'string', required: true } }, execute: runShell,
-  })
+  }, 'self')
   ctx.inject(['schedule'], (sctx) => {
+    packOf.set('remind', 'reminders')
     sctx.tools.register(defineTool({
       name: 'remind',
       description: 'Reminders. action add|list|delete. add: text + when in the user\'s own words ("in 20 min", "tomorrow 5pm", "every weekday at 7:30am", "every year on Mar 3"). delete: id = number from list, id, or words.',
@@ -289,25 +320,25 @@ export async function apply(ctx) {
     name: 'weather', description: 'Current weather + daily forecast. Default location: user home.',
     parameters: { location: { type: 'string' }, days: { type: 'number', description: '1-5' } },
     execute: weather,
-  })
+  }, 'weather')
   reg({
     name: 'web_search', description: 'Google search (Serper). For facts that change or that you do not know.',
     parameters: { query: { type: 'string', required: true } }, execute: webSearch,
-  })
+  }, 'web')
   reg({
     name: 'places', description: 'Find stores/places with hours, address, rating. Default near user home.',
     parameters: { query: { type: 'string', required: true }, near: { type: 'string' } }, execute: places,
-  })
+  }, 'places')
   reg({
     name: 'travel_time', description: 'Distance and rough travel time. Default start: user home.',
     parameters: { to: { type: 'string', required: true }, from: { type: 'string' }, mode: { type: 'string', description: 'car|walk|bike' } },
     execute: travelTime,
-  })
+  }, 'places')
   reg({
     name: 'notes', description: 'User notes. action add|list|delete; text = note or list filter.',
     parameters: { action: { type: 'string', required: true }, text: { type: 'string' }, id: { type: 'number' } },
     execute: notes,
-  })
+  }, 'reminders')
 
   mkdirSync(TOOLS_DIR, { recursive: true })
   const loaded = new Map()
@@ -322,18 +353,20 @@ export async function apply(ctx) {
       description: { type: 'string', required: true },
       params: { type: 'string', description: 'JSON object' },
       code: { type: 'string', required: true },
+      pack: { type: 'string', description: 'when to offer it: web|places|weather|reminders|self (default web)' },
     },
-    async execute({ name: toolName, description, params, code }) {
+    async execute({ name: toolName, description, params, code, pack }) {
       if (!/^[a-z][a-z0-9_]{1,40}$/.test(toolName)) return 'bad name: use snake_case'
       const file = join(TOOLS_DIR, `${toolName}.mjs`)
       const existed = existsSync(file)
       // Models often send a whole `async function run(...)` instead of a body; accept both.
       const body = /function\s+run\s*\(/.test(code) ? `${code}\nreturn run(args, { fetch, getJson })` : code
       writeFileSync(file, `export const description = ${JSON.stringify(description)}\n`
+        + `export const pack = ${JSON.stringify(PACK_NAMES.includes(pack) ? pack : 'web')}\n`
         + `export const parameters = ${params ? JSON.stringify(JSON.parse(params)) : '{}'}\n`
         + `export async function run(args, { fetch, getJson }) {\n${body}\n}\n`)
       await loadCustomTool(ctx, file, loaded)
       return `${existed ? 'replaced' : 'created'} tool ${toolName}; call it now.`
     },
-  })
+  }, 'self')
 }
