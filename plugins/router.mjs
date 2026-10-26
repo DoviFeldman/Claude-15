@@ -24,62 +24,80 @@ function keywordRoute(text) {
 }
 
 // --- Decision-model client ---------------------------------------------
-// Vercel AI Gateway /v1/evaluate (yes/no type "boolean", field "probability"),
-// or TypeSafe's own API (type "noul", field "noul"). DECISION_MODEL picks the
-// model; off unless set, since Vercel's free tier does not serve Jev.
-function endpoint() {
-  const model = process.env.DECISION_MODEL
-  if (process.env.TYPESAFE_API_KEY) return { url: 'https://api.typesafe.ai/v1/systemone', key: process.env.TYPESAFE_API_KEY, model: model ?? 'jev-latest', yesNo: 'noul' }
-  if (process.env.AI_GATEWAY_API_KEY && model) return { url: 'https://ai-gateway.vercel.sh/v1/evaluate', key: process.env.AI_GATEWAY_API_KEY, model, yesNo: 'boolean' }
+// Vercel AI Gateway /v1/evaluate. Each job tries its models in order and falls
+// through on errors or rate limits (free tier: 5 req/min per model). Defaults
+// are Baseten's zero-data-retention models; Elephant-1 benched best at both
+// routing (19/19) and result filtering. Laya is not used: it retains data and
+// scored results almost uniformly.
+const list = (v, d) => (v ?? d).split(',').map((s) => s.trim()).filter(Boolean)
+const ROUTER_MODELS = list(process.env.ROUTER_MODELS, 'baseten/elephant-1,baseten/mammoth-1')
+const FILTER_MODELS = list(process.env.FILTER_MODELS, 'baseten/elephant-1,baseten/mammoth-1')
+const downUntil = new Map() // model -> time it may be tried again
+
+async function evaluate(model, state, questions, timeoutMs) {
+  const res = await fetch('https://ai-gateway.vercel.sh/v1/evaluate', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${process.env.AI_GATEWAY_API_KEY}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model, state, questions: Object.fromEntries(Object.entries(questions).map(([k, q]) => [k, { type: 'boolean', instructions: q }])) }),
+    signal: AbortSignal.timeout(timeoutMs),
+  })
+  if (!res.ok) {
+    // Rate limit: sit out only as long as the gateway says; other errors: 10 min.
+    const wait = res.status === 429 ? Number(res.headers.get('retry-after') ?? 10) * 1000 : 10 * 60000
+    downUntil.set(model, Date.now() + wait)
+    throw new Error(`${res.status} ${(await res.text()).slice(0, 120)}`)
+  }
+  const { answers } = await res.json()
+  return Object.fromEntries(Object.entries(answers).map(([k, a]) => [k, a.probability ?? 0]))
+}
+
+// questions: { name: yes/no instructions } -> { p: { name: probability }, model } or null.
+async function decide(models, state, questions, timeoutMs) {
+  if (!process.env.AI_GATEWAY_API_KEY) return null
+  for (const model of models) {
+    if (Date.now() < (downUntil.get(model) ?? 0)) continue
+    try {
+      return { p: await evaluate(model, state, questions, timeoutMs), model }
+    } catch (e) {
+      if (!downUntil.has(model) || Date.now() >= downUntil.get(model)) downUntil.set(model, Date.now() + 60000) // timeouts
+      console.warn(`[router] ${model}: ${e.message}`)
+    }
+  }
   return null
 }
 
-let downUntil = 0 // after a failure, skip the model for a while instead of paying the timeout every message
-
-// questions: { name: instructions } yes/no questions -> { name: probability } or null.
-export async function jev(state, questions, timeoutMs = Number(process.env.JEV_TIMEOUT_MS ?? 2500)) {
-  const ep = endpoint()
-  if (!ep || Date.now() < downUntil) return null
-  try {
-    const res = await fetch(ep.url, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${ep.key}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: ep.model, state, questions: Object.fromEntries(Object.entries(questions).map(([k, q]) => [k, { type: ep.yesNo, instructions: q }])) }),
-      signal: AbortSignal.timeout(timeoutMs),
-    })
-    if (!res.ok) throw new Error(`${res.status} ${(await res.text()).slice(0, 160)}`)
-    const { answers } = await res.json()
-    return Object.fromEntries(Object.entries(answers).map(([k, a]) => [k, a.probability ?? a.noul ?? 0]))
-  } catch (e) {
-    downUntil = Date.now() + 10 * 60000
-    console.warn(`[router] ${ep.model} unavailable, using fallback for 10 min: ${e.message}`)
-    return null
-  }
+// One yes/no per pack, bundled in one request. Liberal threshold: a missing
+// tool costs more than a few extra prompt lines.
+// Routing sits in front of every reply, so all router models are asked at once
+// and the first answer wins, capped at ROUTER_TIMEOUT_MS (cold starts happen).
+async function race(models, state, questions, timeoutMs) {
+  const live = models.filter((m) => Date.now() >= (downUntil.get(m) ?? 0))
+  if (!process.env.AI_GATEWAY_API_KEY || !live.length) return null
+  return Promise.any(live.map((m) => decide([m], state, questions, timeoutMs).then((d) => d ?? Promise.reject(new Error('no answer')))))
+    .catch(() => null)
 }
 
-// Bundled yes/no per pack (Jev runs them in parallel). Liberal threshold: a
-// missing tool costs more than a few extra prompt lines.
 export async function route(text) {
   const t = Date.now()
-  const p = await jev(`User message to a personal assistant: ${text}`, Object.fromEntries(
-    Object.entries(PACKS).map(([k, desc]) => [k, `Does answering this message need help with: ${desc}?`])))
+  const d = await race(ROUTER_MODELS, `User message to a personal assistant: ${text}`, Object.fromEntries(
+    Object.entries(PACKS).map(([k, desc]) => [k, `Does answering this message need help with: ${desc}?`])), Number(process.env.ROUTER_TIMEOUT_MS ?? 1500))
   // Model and keywords are unioned: either one spotting a need is enough.
   const kw = keywordRoute(text)
-  const picked = p ? [...new Set([...Object.keys(PACKS).filter((k) => p[k] >= 0.3), ...kw])] : kw
+  const picked = d ? [...new Set([...Object.keys(PACKS).filter((k) => d.p[k] >= 0.3), ...kw])] : kw
   // Nothing matched: still allow a web lookup rather than leave the model toolless.
   const packs = picked.length ? picked : ['web']
-  return { packs, by: p ? process.env.DECISION_MODEL ?? 'jev' : 'keywords', ms: Date.now() - t, ...(p ? { scores: p } : {}) }
+  return { packs, by: d?.model ?? 'keywords', ms: Date.now() - t }
 }
 
-// Keep only search results that help answer `query`. Jev scores each one;
-// fallback keeps the first `keep` in Google's order.
+// Keep only search results that help answer `query`; fallback keeps Google's top `keep`.
 export async function filterResults(query, results, keep = 3) {
   if (results.length <= keep) return { results, by: 'none' }
-  const p = await jev(
+  const d = await decide(FILTER_MODELS,
     { question: query, results: Object.fromEntries(results.map((r, i) => [`r${i}`, r])) },
-    Object.fromEntries(results.map((_, i) => [`r${i}`, `Does result r${i} contain information that helps answer the question?`])))
-  if (!p) return { results: results.slice(0, keep), by: 'order' }
-  const ranked = results.map((r, i) => [r, p[`r${i}`] ?? 0]).sort((a, b) => b[1] - a[1])
+    Object.fromEntries(results.map((_, i) => [`r${i}`, `Does result r${i} contain information that helps answer the question?`])),
+    Number(process.env.FILTER_TIMEOUT_MS ?? 2500))
+  if (!d) return { results: results.slice(0, keep), by: 'order' }
+  const ranked = results.map((r, i) => [r, d.p[`r${i}`] ?? 0]).sort((a, b) => b[1] - a[1])
   const good = ranked.filter(([, p]) => p >= 0.5).slice(0, keep)
-  return { results: (good.length ? good : ranked.slice(0, 1)).map(([r]) => r), by: 'jev' }
+  return { results: (good.length ? good : ranked.slice(0, 1)).map(([r]) => r), by: d.model }
 }

@@ -9,10 +9,11 @@ Groq model: `qwen/qwen3.8-27b` (only). Runs as a custom `dsh` profile (`groqbot`
 ## Topic packs + router (token saver)
 Each message is routed (`plugins/router.mjs`) to the packs it needs: `places`, `web`, `weather`, `reminders`, `self`
 (+ `core`, always). Only those packs' instructions (`agent/packs/<pack>.md`) and tools are shown to the model, and
-user facts ride along only with packs that use them. Routing is keyword-based by default (free, instant); set
-`DECISION_MODEL=typesafe-ai/jev` (needs paid Vercel AI Gateway credits) or `TYPESAFE_API_KEY` to add Jev, which is
-unioned with the keywords. Jev also filters Serper results down to the relevant few (fallback: top 3).
-`node bench/router.bench.mjs <model>` grades a decision model against keywords.
+user facts ride along only with packs that use them. With `AI_GATEWAY_API_KEY` set, a free zero-data-retention decision model on Vercel AI Gateway also routes (unioned
+with keywords) and filters Serper results to the relevant few: `ROUTER_MODELS` / `FILTER_MODELS` (default
+`baseten/elephant-1,baseten/mammoth-1`, tried in order; free tier = 5 req/min per model, so a rate-limited model is
+skipped for the seconds the gateway asks). Without the key: keywords + Google's top 3.
+`SPACING_MS=13000 node bench/router.bench.mjs <model>` grades routing; `node bench/filter.bench.mjs <models>` compares result picks.
 
 ## Chat commands
 `/continue` back to the previous chat · `/retry` last question in a fresh chat · `/usage` tokens of last answer · `/help` · `/commands` · `/new` fresh chat (kept last in the menu).

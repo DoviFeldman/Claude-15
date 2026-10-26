@@ -130,7 +130,15 @@ function hoursToday(spec) {
   return `hours: ${spec}`
 }
 
+// Home is geocoded on nearly every weather/places call; addresses don't move, so cache.
+const geoCache = new Map()
 async function geocode(q) {
+  const key = q.trim().toLowerCase()
+  if (!geoCache.has(key)) geoCache.set(key, geocodeUncached(q).catch((e) => { geoCache.delete(key); throw e }))
+  return geoCache.get(key)
+}
+
+async function geocodeUncached(q) {
   const r = await getJson(`https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&countrycodes=us&q=${encodeURIComponent(q)}`)
   if (!r.length) throw new Error(`could not find "${q}"`)
   return { lat: +r[0].lat, lon: +r[0].lon, name: r[0].display_name }

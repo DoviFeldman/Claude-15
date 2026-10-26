@@ -78,7 +78,8 @@ export function apply(ctx) {
     for (let seq = from; seq < session.seq; seq++) {
       const ev = session.eventAt(seq)
       if (ev?.type === 'assistant/message') {
-        const t = ev.data.message.content.filter((b) => b.type === 'text').map((b) => b.text).join('')
+        // Qwen occasionally leaks its reasoning; keep only what follows the last </think>.
+        const t = ev.data.message.content.filter((b) => b.type === 'text').map((b) => b.text).join('').split('</think>').pop().trim()
         if (t) out = t
       }
       if (ev?.type === 'turn/end' && ev.data.reason?.kind === 'error') out ||= friendlyError(ev.data.reason.error?.message ?? '')

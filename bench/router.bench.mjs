@@ -12,7 +12,9 @@ const cases = [
 ]
 const kw = (await import('../plugins/router.mjs'))
 let okM = 0, okK = 0, ms = []
+const SPACING = Number(process.env.SPACING_MS ?? 0) // free gateway tier: 5 req/min per model
 for (const [q, want] of cases) {
+  if (SPACING) await new Promise((r) => setTimeout(r, SPACING))
   const t = Date.now()
   const res = await fetch('https://ai-gateway.vercel.sh/v1/evaluate', { method: 'POST', headers: { Authorization: `Bearer ${KEY}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ model: MODEL, state: `User message to a personal assistant: ${q}`, questions: Object.fromEntries(Object.entries(PACKS).map(([p, d]) => [p, { type: 'boolean', instructions: `Does answering this message need help with: ${d}?` }])) }) }).then((r) => r.json())
