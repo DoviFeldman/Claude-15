@@ -5,6 +5,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 WORKDIR /app
 COPY plugins/*.mjs plugins/
 COPY config config
+COPY scripts scripts
 COPY run.sh .
 # agent/ (prompt, facts, self-made tools), data/ and dsh-home/ are volumes so self-edits survive rebuilds.
 ENV TZ=America/New_York

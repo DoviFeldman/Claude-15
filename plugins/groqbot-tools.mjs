@@ -1,6 +1,6 @@
 // Groqbot preset plugin: tiny editable prompt + cheap tools (weather, search,
 // places, travel time, notes) + make_tool so the agent can grow new tools.
-import { readFileSync, writeFileSync, readdirSync, mkdirSync, existsSync } from 'node:fs'
+import { readFileSync, writeFileSync, readdirSync, mkdirSync, existsSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { execFile } from 'node:child_process'
@@ -353,6 +353,60 @@ export async function apply(ctx) {
   for (const f of readdirSync(TOOLS_DIR).filter((f) => f.endsWith('.mjs'))) {
     await loadCustomTool(ctx, join(TOOLS_DIR, f), loaded).catch((e) => ctx.logger?.('groqbot').warn?.(`tool ${f}: ${e.message}`))
   }
+  // Same files as the /cmd chat command; the bridge watches the folder and
+  // refreshes Telegram's "/" menu, so commands can be made just by asking.
+  const CMD_DIR = join(AGENT, 'commands')
+  const RESERVED = new Set(['start', 'help', 'new', 'continue', 'retry', 'usage', 'commands', 'cmd', 'model', 'key', 'restart'])
+  reg({
+    name: 'make_command',
+    description: 'Create, replace, or delete (empty prompt) a /slash command for the user. prompt = what the command asks you to do; {args} = text typed after it.',
+    parameters: {
+      name: { type: 'string', required: true, description: 'lowercase, no slash' },
+      description: { type: 'string', description: 'short menu label' },
+      prompt: { type: 'string' },
+    },
+    execute({ name: raw, description, prompt }) {
+      const cname = raw.replace(/^\//, '').toLowerCase()
+      if (!/^[a-z0-9_]{1,32}$/.test(cname)) return 'bad name: letters, digits, _ only'
+      if (RESERVED.has(cname)) return `/${cname} is built in`
+      const file = join(CMD_DIR, `${cname}.md`)
+      mkdirSync(CMD_DIR, { recursive: true })
+      if (!prompt) {
+        if (!existsSync(file)) return `no /${cname}`
+        unlinkSync(file)
+        return `deleted /${cname}`
+      }
+      writeFileSync(file, `# ${(description || prompt).slice(0, 60)}\n${prompt}\n`)
+      return `/${cname} is ready (menu updates in a moment)`
+    },
+  }, 'self')
+  // Same registry the /model command edits; new models load on /restart.
+  const MODELS_FILE = join(ROOT, 'data', 'models.json')
+  reg({
+    name: 'models',
+    description: 'Model registry. action list|add|role. add: name, provider (groq|xai|vercel|openai|openrouter), model id. role: role (e.g. self) + name to send those turns to that model, or name "off". The user switches with /model and loads new ones with /restart; API keys via /key.',
+    parameters: {
+      action: { type: 'string', required: true }, name: { type: 'string' }, provider: { type: 'string' },
+      model: { type: 'string' }, role: { type: 'string' },
+    },
+    execute({ action, name: mname, provider, model, role }) {
+      const regf = JSON.parse(read(MODELS_FILE, '{"default":"","roles":{},"models":{}}'))
+      if (action === 'add') {
+        if (!mname || !provider || !model) return 'add needs name, provider, model'
+        regf.models[mname] = { provider, model }
+      } else if (action === 'role') {
+        if (!role) return 'role needs role'
+        regf.roles ??= {}
+        if (!mname || mname === 'off') delete regf.roles[role]
+        else if (!regf.models[mname]) return `no model ${mname}`
+        else regf.roles[role] = mname
+      } else {
+        return `${JSON.stringify(regf)}\n(default = model used normally)`
+      }
+      writeFileSync(MODELS_FILE, JSON.stringify(regf, null, 1))
+      return action === 'add' ? `added ${mname}; tell the user: set its key with /key if needed, then /restart` : `role ${role} -> ${mname ?? 'off'}`
+    },
+  }, 'self')
   reg({
     name: 'make_tool',
     description: 'Create or replace one of your own tools; usable from your next step. code = body of async run(args, {fetch, getJson}) returning a string. params = JSON like {"city":{"type":"string","required":true}}.',

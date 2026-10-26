@@ -3,7 +3,7 @@
 // groqbot preset. Turns the agent starts by itself (schedule reminders) are
 // pushed back to the chat they belong to.
 import { createServer } from 'node:http'
-import { readFileSync, writeFileSync, appendFileSync, readdirSync, mkdirSync, existsSync, unlinkSync } from 'node:fs'
+import { readFileSync, writeFileSync, appendFileSync, readdirSync, mkdirSync, existsSync, unlinkSync, watch } from 'node:fs'
 import { join } from 'node:path'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { route } from './router.mjs'
@@ -122,13 +122,16 @@ export function apply(ctx) {
   // Show the model only the packs this message needs: deny every other pack's
   // tools for this agent and swap in a prompt built from just those packs.
   const routed = new Map() // agent id -> disposer of the current restriction
+  const lastRouted = new Map() // agent id -> previous message + packs, for follow-ups
   const ALWAYS_HIDDEN = ['working_directory']
   async function applyRoute(agent, textIn) {
     const g = globalThis.groqbot
     if (!g) return undefined
-    const r = await route(textIn)
+    const r = await route(textIn, lastRouted.get(agent.id))
+    lastRouted.set(agent.id, { text: textIn.slice(0, 500), packs: r.packs })
     routed.get(agent.id)?.()
-    const keep = new Set(['core', ...r.packs])
+    // packs null = router had no answer: hide nothing, use the full prompt.
+    const keep = new Set(['core', ...(r.packs ?? g.packOf.values())])
     const deny = [...ALWAYS_HIDDEN, ...[...g.packOf].filter(([, p]) => !keep.has(p)).map(([n]) => n)]
     const disposers = []
     try {
@@ -138,15 +141,29 @@ export function apply(ctx) {
       const known = deny.filter((n) => !String(e.message).includes(`"${n}"`))
       if (known.length) disposers.push(agent.ctx.tools.restrict({ deny: known }))
     }
-    disposers.push(agent.ctx.systemPrompt.variable('groqbot_prompt', () => g.composePrompt(r.packs)))
+    disposers.push(agent.ctx.systemPrompt.variable('groqbot_prompt', () => g.composePrompt(r.packs ?? undefined)))
     routed.set(agent.id, () => disposers.forEach((d) => d()))
     return r
+  }
+
+  // ---- Model registry (data/models.json; loaded into dsh at startup) ----
+  const MODELS_FILE = join(ROOT, 'data', 'models.json')
+  const readModels = () => { try { return JSON.parse(readFileSync(MODELS_FILE, 'utf8')) } catch { return { default: '', roles: {}, models: {} } } }
+  const writeModels = (reg) => writeFileSync(MODELS_FILE, JSON.stringify(reg, null, 1))
+  async function useModel(agent, name) {
+    const m = readModels().models[name]
+    if (!m) throw new Error(`no model "${name}"`)
+    await ctx.sessionController.selectModel({ sessionId: agent.id, provider: m.provider, model: m.model })
   }
 
   async function ask(chat, textIn) {
     const agent = await agentFor(chat)
     await agent.whenIdle()
     const routeInfo = await applyRoute(agent, textIn).catch((e) => ({ error: e.message }))
+    // A role (e.g. roles.self = "grok") hands that kind of turn to another model, then switches back.
+    const reg = readModels()
+    const roleModel = (routeInfo?.packs ?? []).map((p) => reg.roles?.[p]).find((n) => n && reg.models[n])
+    if (roleModel) await useModel(agent, roleModel).catch((e) => console.warn(`[chat-bridge] role model: ${e.message}`))
     const from = agent.session.seq
     busy.add(agent.id)
     const t = Date.now()
@@ -158,12 +175,13 @@ export function apply(ctx) {
     } finally {
       busy.delete(agent.id)
       lastUse.set(agent.id, Date.now())
+      if (roleModel) await useModel(agent, reg.default).catch(() => {})
     }
     const stats = usage.get(agent.id)
     const reply = lastText(agent.session, from)
     return {
       reply: stats?.capped ? `${reply ? `${reply}\n` : ''}(Stopped after ${maxSteps()} steps — try rephrasing or a simpler ask.)` : reply || '(no reply)',
-      ms: Date.now() - t, stats: { ...stats, route: routeInfo },
+      ms: Date.now() - t, stats: { ...stats, route: routeInfo, model: roleModel ?? reg.default },
     }
   }
 
@@ -183,6 +201,9 @@ export function apply(ctx) {
     usage: 'tokens and time of the last answer',
     commands: 'list your custom commands',
     cmd: '/cmd name prompt with {args} = make a command; /cmd name = delete it',
+    model: '/model = list, /model name = switch, /model add name provider model-id',
+    key: '/key NAME value = store an API key (your message is deleted)',
+    restart: 'restart the bot to load new models or keys',
   }
   const NEW_CMD = ['new', 'start a fresh conversation']
   const menu = () => [...Object.entries(BUILTIN), ...Object.entries(customCommands()).map(([k, v]) => [k, v.desc]), NEW_CMD]
@@ -236,7 +257,7 @@ export function apply(ctx) {
       case 'cmd': {
         const [, cname, template] = args.match(/^([a-z0-9_]+)\s*([\s\S]*)$/i) ?? []
         if (!cname) return { reply: BUILTIN.cmd }
-        if (BUILTIN[cname.toLowerCase()] || cname.toLowerCase() === 'new') return { reply: `/${cname} is built in.` }
+        if (BUILTIN[cname.toLowerCase()] || ['new', 'start'].includes(cname.toLowerCase())) return { reply: `/${cname} is built in.` }
         const file = join(CMD_DIR, `${cname.toLowerCase()}.md`)
         if (!template) {
           if (!existsSync(file)) return { reply: `No /${cname}.` }
@@ -246,6 +267,55 @@ export function apply(ctx) {
         writeFileSync(file, `# ${template.slice(0, 60)}\n${template}\n`); syncTelegramMenu()
         return { reply: `Made /${cname.toLowerCase()}. Try it.` }
       }
+      case 'model': {
+        const reg = readModels()
+        const [sub, ...rest] = args.split(/\s+/).filter(Boolean)
+        if (!sub) {
+          const roles = Object.entries(reg.roles ?? {}).map(([r, n]) => `${r} -> ${n}`).join(', ')
+          return { reply: Object.entries(reg.models).map(([n, m]) => `${n === reg.default ? '* ' : '  '}${n} (${m.provider} ${m.model})`).join('\n')
+            + `${roles ? `\nroles: ${roles}` : ''}\nSwitch: /model name. Add: /model add name provider model-id. Role: /model role self name.` }
+        }
+        if (sub === 'add') {
+          const [name, provider, model] = rest
+          if (!name || !provider || !model) return { reply: 'Usage: /model add name provider model-id (providers: groq, xai, vercel, openai, openrouter)' }
+          reg.models[name] = { provider, model }
+          writeModels(reg)
+          return { reply: `Added ${name}. Make sure its API key is set (/key), then /restart, then /model ${name}.` }
+        }
+        if (sub === 'role') {
+          const [role, name] = rest
+          if (!role) return { reply: 'Usage: /model role self name (or /model role self off)' }
+          reg.roles ??= {}
+          if (!name || name === 'off') delete reg.roles[role]
+          else if (!reg.models[name]) return { reply: `No model ${name}.` }
+          else reg.roles[role] = name
+          writeModels(reg)
+          return { reply: name && name !== 'off' ? `${role} turns now use ${name}.` : `${role} turns use the default model.` }
+        }
+        if (!reg.models[sub]) return { reply: `No model ${sub}. /model lists them.` }
+        try {
+          await useModel(await agentFor(chat), sub)
+        } catch (e) {
+          return { reply: `Could not switch: ${e.message}. If you just added it, /restart first.` }
+        }
+        reg.default = sub
+        writeModels(reg)
+        return { reply: `Now using ${sub}.` }
+      }
+      case 'key': {
+        const [, name, value] = args.match(/^([A-Z][A-Z0-9_]+)\s+(\S+)$/) ?? []
+        if (!name) return { reply: 'Usage: /key NAME value, e.g. /key XAI_API_KEY xai-...' }
+        const file = join(ROOT, 'data', 'keys.env')
+        let lines = []
+        try { lines = readFileSync(file, 'utf8').split('\n').filter((l) => l && !l.startsWith(`${name}=`)) } catch {}
+        writeFileSync(file, [...lines, `${name}='${value.replace(/'/g, '')}'`].join('\n') + '\n', { mode: 0o600 })
+        process.env[name] = value
+        return { reply: `Saved ${name}. /restart to be sure everything picks it up.` }
+      }
+      case 'restart':
+        // In Docker (--restart unless-stopped) the container comes straight back up.
+        setTimeout(() => process.exit(0), 1500)
+        return { reply: 'Restarting, back in about 20 seconds.' }
       default: {
         const c = custom[cmd]
         if (!c) return { reply: `Unknown command /${cmd}. Try /help.` }
@@ -295,6 +365,7 @@ export function apply(ctx) {
               await tg('sendMessage', { chat_id: id, text: `Not authorized. Your chat id is ${id}.` })
               continue
             }
+            if (/^\/key\b/i.test(m.text)) tg('deleteMessage', { chat_id: id, message_id: m.message_id }).catch(() => {})
             tg('sendChatAction', { chat_id: id, action: 'typing' })
             handle(`tg:${id}`, m.text)
               .then(({ reply }) => deliver(`tg:${id}`, reply))
@@ -306,6 +377,10 @@ export function apply(ctx) {
       }
     })()
     syncTelegramMenu()
+    // Commands made by the model (make_command) or by hand show up in the menu without a restart.
+    let menuTimer
+    const watcher = watch(CMD_DIR, () => { clearTimeout(menuTimer); menuTimer = setTimeout(syncTelegramMenu, 500) })
+    ctx.effect(() => () => watcher.close())
     console.log('[chat-bridge] Telegram polling started')
   }
 

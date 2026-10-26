@@ -11,5 +11,9 @@ mkdir -p data agent/tools plugins/node_modules
 # Let the plugins import dsh's own packages.
 ln -sfn "$(npm root -g)/@deepseek-ai/dsh/node_modules/@deepseek-ai" plugins/node_modules/@deepseek-ai
 sed "s|__ROOT__|$ROOT|g" config/groqbot.yml > data/groqbot.generated.yml
+[ -f data/models.json ] || cp config/models.default.json data/models.json
+node scripts/models-patch.mjs data/models.json data/models.generated.yml || exit 1
+# Keys added from chat with /key live here (outside git, mode 600).
+[ -f data/keys.env ] && { set -a; . ./data/keys.env; set +a; }
 [ -d "$DSH_HOME/profiles/groqbot" ] || dsh groqbot --from-default-profile web --dump-config >/dev/null
-exec dsh groqbot --patch ./data/groqbot.generated.yml --no-open "$@"
+exec dsh groqbot --patch ./data/groqbot.generated.yml --patch ./data/models.generated.yml --no-open "$@"

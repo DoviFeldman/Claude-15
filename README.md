@@ -9,11 +9,19 @@ Groq model: `qwen/qwen3.8-27b` (only). Runs as a custom `dsh` profile (`groqbot`
 ## Topic packs + router (token saver)
 Each message is routed (`plugins/router.mjs`) to the packs it needs: `places`, `web`, `weather`, `reminders`, `self`
 (+ `core`, always). Only those packs' instructions (`agent/packs/<pack>.md`) and tools are shown to the model, and
-user facts ride along only with packs that use them. With `AI_GATEWAY_API_KEY` set, a free zero-data-retention decision model on Vercel AI Gateway also routes (unioned
-with keywords) and filters Serper results to the relevant few: `ROUTER_MODELS` / `FILTER_MODELS` (default
-`baseten/elephant-1,baseten/mammoth-1`, tried in order; free tier = 5 req/min per model, so a rate-limited model is
-skipped for the seconds the gateway asks). Without the key: keywords + Google's top 3.
+user facts ride along only with packs that use them. Routing uses a free zero-data-retention decision model on Vercel AI Gateway (`AI_GATEWAY_API_KEY`): `ROUTER_MODELS`
+(default `baseten/elephant-1,baseten/mammoth-1`) are tried in order, the next only when one is rate-limited (free
+tier: 5 req/min per model). The previous message is included so follow-ups keep their topic. If no model answers
+within `ROUTER_TIMEOUT_MS` (1500), the turn simply runs unrouted (full prompt, all tools). `FILTER_MODELS` trims
+Serper results the same way (fallback: Google's top 3).
 `SPACING_MS=13000 node bench/router.bench.mjs <model>` grades routing; `node bench/filter.bench.mjs <models>` compares result picks.
+
+## Models
+`data/models.json` lists models (`default`, `roles`, `models`); `scripts/models-patch.mjs` turns it into dsh config at
+startup. From Telegram: `/model` (list), `/model name` (switch), `/model add name provider model-id`
+(providers: groq, xai, vercel, openai, openrouter), `/model role self name` (send self-editing turns to another model),
+`/key NAME value` (stores an API key in `data/keys.env`, deletes your message), `/restart` (Docker brings it back).
+The bot can do the same by being asked (tools `models`, `make_command`).
 
 ## Chat commands
 `/continue` back to the previous chat · `/retry` last question in a fresh chat · `/usage` tokens of last answer · `/help` · `/commands` · `/new` fresh chat (kept last in the menu).

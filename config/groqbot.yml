@@ -1,29 +1,4 @@
-# Groq-only model route: qwen/qwen3.8-27b
-- id: llm-pi-ai
-  config:
-    providers:
-      groq:
-        apiKeyEnv: GROQ_API_KEY
-        api: openai-completions
-        baseURL: https://api.groq.com/openai/v1
-        compat:
-          supportsDeveloperRole: false
-          maxTokensField: max_tokens
-        # Free tier = ~7k input tokens/min: wait out the window instead of failing.
-        retryPolicy:
-          mode: normal
-          maxRetries: 6
-          backoff:
-            initialDelayMs: 2000
-            maxDelayMs: 65000
-        models:
-          - id: qwen/qwen3.8-27b
-            contextWindow: 131072
-            maxTokens: 1500
-- id: agent-default-model
-  config:
-    provider: groq
-    model: qwen/qwen3.8-27b
+# Model routes and the default model come from data/models.json (scripts/models-patch.mjs).
 - id: agent-preset-registry
   config:
     default: groqbot

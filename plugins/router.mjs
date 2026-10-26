@@ -1,6 +1,6 @@
 // Picks which prompt/tool packs a message needs, and which search results are
-// worth keeping. Uses Jev (TypeSafe decision model) when a key works, else a
-// free keyword fallback, so the bot never depends on Jev being up.
+// worth keeping, using free decision models on Vercel AI Gateway. When they
+// are unavailable the bot simply runs unrouted.
 
 export const PACKS = {
   places: 'stores, restaurants, businesses, opening hours, addresses, distance or travel time, directions',
@@ -8,19 +8,6 @@ export const PACKS = {
   weather: 'weather, temperature, rain, forecast, sunrise or sunset',
   reminders: 'reminders, alarms, scheduling something, notes, remembering or recalling something',
   self: 'changing the bot itself: its prompt, settings, commands, tools, code, files, or facts about the user',
-}
-
-// Plurals (reminders, stores) match via the trailing (?:s|es)?.
-const KEYWORDS = {
-  places: /\b(store|shop|restaurant|cafe|coffee|dunkin|starbucks|target|walmart|uniqlo|mall|open|close[sd]?|hours|near(by| me)?|closest|nearest|address|street|far|distance|drive|driving|walk|bike|miles?|minutes? away|get to|directions|pharmacy|gas|grocery|pizza|dinner|lunch|breakfast|food|eat|bakery|bagel|sushi)(?:s|es)?\b/i,
-  web: /(\$\d)|\b(best|top|under|price|cost|how much|buy|cheapest|least|news|score|game|win|won|beat|last night|yesterday|today's|tonight's|who is|what is the|latest|release|specs?|range|battery|review|vs\.?|compare|stock|company|invest|minimum|website|search|google|look up)(?:s|es)?\b/i,
-  weather: /\b(weather|rain|snow|temperature|temp|cold|hot|warm|forecast|wind|humid|storm|sunny|cloudy|sunset|sunrise|umbrella|jacket)(?:s|es)?\b/i,
-  reminders: /\b(remind|reminder|alarm|schedule|every (day|week|morning|night)|everyday|tomorrow at|note|notes|remember|forget|wrote down|todo|to-do)(?:s|es)?\b/i,
-  self: /\b(edit yourself|change your|update your|commands?|menu|your (prompt|settings?|commands?|tools?|code|files?)|fresh chat|idle|make (a|yourself a) (tool|command)|build (a|yourself a) tool|setting|\/cmd|harness|plugin|restart)(?:s|es)?\b/i,
-}
-
-function keywordRoute(text) {
-  return Object.keys(PACKS).filter((p) => KEYWORDS[p].test(text))
 }
 
 // --- Decision-model client ---------------------------------------------
@@ -51,6 +38,9 @@ async function evaluate(model, state, questions, timeoutMs) {
   return Object.fromEntries(Object.entries(answers).map(([k, a]) => [k, a.probability ?? 0]))
 }
 
+// Tries models in order. The next model is used only when one is rate-limited
+// or erroring (it sits out for the gateway's retry-after); a slow answer just
+// gives up for this call, since waiting on a second model would double latency.
 // questions: { name: yes/no instructions } -> { p: { name: probability }, model } or null.
 async function decide(models, state, questions, timeoutMs) {
   if (!process.env.AI_GATEWAY_API_KEY) return null
@@ -59,34 +49,28 @@ async function decide(models, state, questions, timeoutMs) {
     try {
       return { p: await evaluate(model, state, questions, timeoutMs), model }
     } catch (e) {
-      if (!downUntil.has(model) || Date.now() >= downUntil.get(model)) downUntil.set(model, Date.now() + 60000) // timeouts
       console.warn(`[router] ${model}: ${e.message}`)
+      if (e.name === 'TimeoutError') return null
     }
   }
   return null
 }
 
-// One yes/no per pack, bundled in one request. Liberal threshold: a missing
-// tool costs more than a few extra prompt lines.
-// Routing sits in front of every reply, so all router models are asked at once
-// and the first answer wins, capped at ROUTER_TIMEOUT_MS (cold starts happen).
-async function race(models, state, questions, timeoutMs) {
-  const live = models.filter((m) => Date.now() >= (downUntil.get(m) ?? 0))
-  if (!process.env.AI_GATEWAY_API_KEY || !live.length) return null
-  return Promise.any(live.map((m) => decide([m], state, questions, timeoutMs).then((d) => d ?? Promise.reject(new Error('no answer')))))
-    .catch(() => null)
-}
-
-export async function route(text) {
+// One yes/no per pack, bundled in one request, so several packs can be picked
+// at once (e.g. "remind me before Target closes" = places + reminders). The
+// previous message is included so follow-ups ("and the one in Eatontown?")
+// keep their topic. If no model answers in time, packs is null: the bridge
+// then shows Qwen everything (full prompt, all tools) rather than guessing.
+export async function route(text, previous) {
   const t = Date.now()
-  const d = await race(ROUTER_MODELS, `User message to a personal assistant: ${text}`, Object.fromEntries(
-    Object.entries(PACKS).map(([k, desc]) => [k, `Does answering this message need help with: ${desc}?`])), Number(process.env.ROUTER_TIMEOUT_MS ?? 1500))
-  // Model and keywords are unioned: either one spotting a need is enough.
-  const kw = keywordRoute(text)
-  const picked = d ? [...new Set([...Object.keys(PACKS).filter((k) => d.p[k] >= 0.3), ...kw])] : kw
-  // Nothing matched: still allow a web lookup rather than leave the model toolless.
-  const packs = picked.length ? picked : ['web']
-  return { packs, by: d?.model ?? 'keywords', ms: Date.now() - t }
+  const state = previous?.text
+    ? { previous_user_message: previous.text, latest_user_message: text }
+    : { latest_user_message: text }
+  const d = await decide(ROUTER_MODELS, state, Object.fromEntries(Object.entries(PACKS).map(([k, desc]) =>
+    [k, `To answer the latest message (read it as a follow-up if it refers back to the previous one), does the assistant need help with: ${desc}?`])),
+  Number(process.env.ROUTER_TIMEOUT_MS ?? 1500))
+  if (d) return { packs: Object.keys(PACKS).filter((k) => d.p[k] >= 0.3), by: d.model, ms: Date.now() - t }
+  return { packs: null, by: 'none (full prompt)', ms: Date.now() - t }
 }
 
 // Keep only search results that help answer `query`; fallback keeps Google's top `keep`.

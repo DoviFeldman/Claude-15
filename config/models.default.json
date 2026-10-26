@@ -1,0 +1,7 @@
+{
+  "default": "qwen",
+  "roles": {},
+  "models": {
+    "qwen": { "provider": "groq", "model": "qwen/qwen3.8-27b", "contextWindow": 131072, "maxTokens": 1500 }
+  }
+}
