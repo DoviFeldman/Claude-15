@@ -114,7 +114,7 @@ export function apply(ctx) {
       // Not a turn we are awaiting: the agent woke itself (reminder). Push it.
       if (!busy.has(session.id) && start) {
         const reply = lastText(session, start.seq)
-        if (reply) deliver(chat, `⏰ ${reply}`)
+        if (reply) deliver(chat, reply.startsWith('⏰') ? reply : `⏰ ${reply}`)
       }
     }
   })
@@ -185,6 +185,29 @@ export function apply(ctx) {
     }
   }
 
+  // ---- OAuth sign-in (xAI device code) ----
+  // dsh's authorization registry runs pi-ai's xAI flow and stores the token in
+  // dsh's credential store, where the xai route reads (and refreshes) it. The
+  // user approves in their own browser; the bot only relays the link and code.
+  function startLogin(chat, auth, key) {
+    auth.begin({
+      key,
+      method: 'oauth',
+      interaction: {
+        notify: (n) => deliver(chat, [n.message, n.code ? `Code: ${n.code}` : '', n.url ?? ''].filter(Boolean).join('\n')),
+        prompt: () => Promise.reject(new Error('this sign-in cannot answer questions from chat')),
+      },
+    }).then((outcome) => {
+      if (outcome.status !== 'authorized') return deliver(chat, 'Sign-in cancelled.')
+      const reg = readModels()
+      reg.models.grok = { provider: 'xai', model: process.env.GROK_MODEL ?? 'grok-4.3', auth: 'oauth', maxTokens: 4000 }
+      reg.roles = { ...reg.roles, self: 'grok' }
+      writeModels(reg)
+      deliver(chat, 'Signed in to Grok. Edits to the bot now go to Grok; /model grok to chat with it, /model qwen to switch back. Restarting to load it (about 20 s)...')
+      setTimeout(() => process.exit(0), 2000)
+    }).catch((e) => deliver(chat, `Sign-in failed: ${e.message}`))
+  }
+
   // ---- Slash commands (shared by Telegram and the local endpoint) ----
   // Custom commands are agent/commands/<name>.md: first line "# description",
   // the rest a prompt template where {args} is whatever follows the command.
@@ -204,6 +227,7 @@ export function apply(ctx) {
     model: '/model = list, /model name = switch, /model add name provider model-id',
     key: '/key NAME value = store an API key (your message is deleted)',
     restart: 'restart the bot to load new models or keys',
+    login: '/login grok = sign in with your SuperGrok / X Premium account',
   }
   const NEW_CMD = ['new', 'start a fresh conversation']
   const menu = () => [...Object.entries(BUILTIN), ...Object.entries(customCommands()).map(([k, v]) => [k, v.desc]), NEW_CMD]
@@ -311,6 +335,26 @@ export function apply(ctx) {
         writeFileSync(file, [...lines, `${name}='${value.replace(/'/g, '')}'`].join('\n') + '\n', { mode: 0o600 })
         process.env[name] = value
         return { reply: `Saved ${name}. /restart to be sure everything picks it up.` }
+      }
+      case 'login':
+      case 'logout': {
+        const provider = { grok: 'xai', xai: 'xai' }[(args || 'grok').toLowerCase()]
+        if (!provider) return { reply: 'Usage: /login grok' }
+        const auth = ctx.get('authorization')
+        const flow = auth?.list().find((f) => String(f.key).endsWith(`/${provider}`))
+        if (!flow) return { reply: 'Sign-in is not available in this build.' }
+        if (cmd === 'logout') {
+          await ctx.get('credentials')?.deleteRecord?.(flow.key)
+          const reg = readModels()
+          delete reg.models.grok
+          for (const [r, n] of Object.entries(reg.roles ?? {})) if (n === 'grok') delete reg.roles[r]
+          if (reg.default === 'grok') reg.default = 'qwen'
+          writeModels(reg)
+          return { reply: 'Signed out of Grok. /restart to finish.' }
+        }
+        if (flow.inFlight) return { reply: 'A sign-in is already waiting for you; use the link I sent.' }
+        startLogin(chat, auth, flow.key)
+        return { reply: 'Starting xAI sign-in (needs SuperGrok or X Premium)...' }
       }
       case 'restart':
         // In Docker (--restart unless-stopped) the container comes straight back up.

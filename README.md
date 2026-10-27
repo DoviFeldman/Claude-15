@@ -20,7 +20,7 @@ Serper results the same way (fallback: Google's top 3).
 `data/models.json` lists models (`default`, `roles`, `models`); `scripts/models-patch.mjs` turns it into dsh config at
 startup. From Telegram: `/model` (list), `/model name` (switch), `/model add name provider model-id`
 (providers: groq, xai, vercel, openai, openrouter), `/model role self name` (send self-editing turns to another model),
-`/key NAME value` (stores an API key in `data/keys.env`, deletes your message), `/restart` (Docker brings it back).
+`/key NAME value` (stores an API key in `data/keys.env`, deletes your message), `/restart` (Docker brings it back), `/login grok` (xAI device-code sign-in with a SuperGrok / X Premium account: the bot sends a link + code, the token is stored in dsh's credential store, Grok is added with `auth: oauth` and self-editing turns are routed to it), `/logout grok`.
 The bot can do the same by being asked (tools `models`, `make_command`).
 
 ## Chat commands

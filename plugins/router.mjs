@@ -5,7 +5,7 @@
 export const PACKS = {
   places: 'stores, restaurants, businesses, opening hours, addresses, distance or travel time, directions',
   web: 'facts that need looking up online: prices, products, specs, news, sports, companies, people, anything recent',
-  weather: 'weather, temperature, rain, forecast, sunrise or sunset',
+  weather: 'weather, temperature, rain, forecast, sunrise, sunset, moonrise, moonset, moon',
   reminders: 'reminders, alarms, scheduling something, notes, remembering or recalling something',
   self: 'changing the bot itself: its prompt, settings, commands, tools, code, files, or facts about the user',
 }

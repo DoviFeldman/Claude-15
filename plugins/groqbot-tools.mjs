@@ -47,7 +47,9 @@ async function weather({ location, days }) {
     `Now: ${Math.round(now.temperature)}F (feels ${Math.round(now.temperatureApparent)}F), ${WX[now.weatherCode] ?? now.weatherCode}, wind ${Math.round(now.windSpeed)} mph, rain chance ${now.precipitationProbability}%`]
   for (const day of d.timelines.daily.slice(0, n)) {
     const v = day.values
-    lines.push(`${day.time.slice(0, 10)}: ${Math.round(v.temperatureMin)}-${Math.round(v.temperatureMax)}F, ${WX[v.weatherCodeMax] ?? v.weatherCodeMax}, rain ${v.precipitationProbabilityMax}%`)
+    const at = (iso) => iso ? new Date(iso).toLocaleTimeString('en-US', { timeZone: TZ, hour: 'numeric', minute: '2-digit' }) : '?'
+    lines.push(`${day.time.slice(0, 10)}: ${Math.round(v.temperatureMin)}-${Math.round(v.temperatureMax)}F, ${WX[v.weatherCodeMax] ?? v.weatherCodeMax}, rain ${v.precipitationProbabilityMax}%`
+      + ` | sun ${at(v.sunriseTime)}-${at(v.sunsetTime)}, moonrise ${at(v.moonriseTime)}, moonset ${at(v.moonsetTime)}`)
   }
   return lines.join('\n')
 }
@@ -325,7 +327,7 @@ export async function apply(ctx) {
     }))
   })
   reg({
-    name: 'weather', description: 'Current weather + daily forecast. Default location: user home.',
+    name: 'weather', description: 'Current weather + daily forecast incl. sunrise/sunset/moonrise/moonset. Default location: user home.',
     parameters: { location: { type: 'string' }, days: { type: 'number', description: '1-5' } },
     execute: weather,
   }, 'weather')
@@ -356,7 +358,7 @@ export async function apply(ctx) {
   // Same files as the /cmd chat command; the bridge watches the folder and
   // refreshes Telegram's "/" menu, so commands can be made just by asking.
   const CMD_DIR = join(AGENT, 'commands')
-  const RESERVED = new Set(['start', 'help', 'new', 'continue', 'retry', 'usage', 'commands', 'cmd', 'model', 'key', 'restart'])
+  const RESERVED = new Set(['start', 'help', 'new', 'continue', 'retry', 'usage', 'commands', 'cmd', 'model', 'key', 'restart', 'login', 'logout'])
   reg({
     name: 'make_command',
     description: 'Create, replace, or delete (empty prompt) a /slash command for the user. prompt = what the command asks you to do; {args} = text typed after it.',

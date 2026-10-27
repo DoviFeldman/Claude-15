@@ -19,6 +19,14 @@ export const PROVIDERS = {
 export function buildPatch(reg) {
   const providers = {}
   for (const [name, m] of Object.entries(reg.models)) {
+    // Signed in with OAuth (e.g. /login grok): use pi-ai's installed catalog
+    // route (its endpoint and protocol) and no apiKeyEnv, which would
+    // otherwise take precedence over the stored sign-in.
+    if (m.auth === 'oauth') {
+      providers[m.provider] ??= { models: [] }
+      providers[m.provider].models.push({ id: m.model, ...(m.maxTokens ? { maxTokens: m.maxTokens } : {}) })
+      continue
+    }
     const base = PROVIDERS[m.provider] ?? {}
     const id = m.provider
     providers[id] ??= {
