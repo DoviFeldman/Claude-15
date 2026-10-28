@@ -5,6 +5,7 @@
 import { createServer } from 'node:http'
 import { readFileSync, writeFileSync, appendFileSync, readdirSync, mkdirSync, existsSync, unlinkSync, watch } from 'node:fs'
 import { join } from 'node:path'
+import { spawn } from 'node:child_process'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { route } from './router.mjs'
 
@@ -185,6 +186,73 @@ export function apply(ctx) {
     }
   }
 
+  // ---- Claude Code mode (/claude) ----
+  // The maintainer: Claude Code runs headless in the bot folder (it reads
+  // CLAUDE.md), skips the router and Qwen's prompt, and may take its time.
+  // Progress (tool use) is posted as it works; one run per chat at a time.
+  const CLAUDE_FILE = join(ROOT, 'data', 'claude-sessions.json')
+  const claudeState = (() => { try { return JSON.parse(readFileSync(CLAUDE_FILE, 'utf8')) } catch { return { mode: {}, session: {}, last: {} } } })()
+  const saveClaude = () => writeFileSync(CLAUDE_FILE, JSON.stringify(claudeState, null, 1))
+  const claudeRuns = new Map() // chat -> child process
+  const CLAUDE_NOTE = 'You are talking to the owner through Telegram (/claude mode). Read CLAUDE.md before changing anything. Reply in short plain text. There is no time pressure.'
+  const CLAUDE_TOOLS = ['Bash', 'Read', 'Edit', 'Write', 'Glob', 'Grep', 'WebFetch', 'WebSearch', 'TodoWrite']
+  const RESTART_FLAG = join(ROOT, 'data', 'restart-requested')
+
+  function toolLine(use) {
+    const i = use.input ?? {}
+    const what = i.command ?? i.file_path ?? i.pattern ?? i.url ?? i.query ?? i.description ?? ''
+    return `${use.name}${what ? `: ${String(what).replace(/\s+/g, ' ').slice(0, 90)}` : ''}`
+  }
+
+  function askClaude(chat, textIn) {
+    if (claudeRuns.has(chat)) return Promise.resolve({ reply: 'Claude is still working on the last message. /stop cancels it.' })
+    const sid = claudeState.session[chat]
+    const args = ['-p', '--output-format', 'stream-json', '--verbose', '--permission-mode', 'acceptEdits',
+      '--append-system-prompt', CLAUDE_NOTE, ...(sid ? ['--resume', sid] : []), '--allowedTools', ...CLAUDE_TOOLS]
+    const child = spawn('claude', args, { cwd: ROOT, env: process.env, stdio: ['pipe', 'pipe', 'pipe'] })
+    claudeRuns.set(chat, child)
+    child.stdin.end(textIn)
+    const t = Date.now()
+    let buf = '', err = '', result, pending = [], lastSent = 0
+    const flush = (force) => {
+      if (!pending.length || (!force && Date.now() - lastSent < 15000)) return
+      deliver(chat, `🔧 ${pending.join('\n🔧 ')}`.slice(0, 1500))
+      pending = []; lastSent = Date.now()
+    }
+    const ticker = setInterval(() => { flush(false); if (chat.startsWith('tg:') && token) tg('sendChatAction', { chat_id: chat.slice(3), action: 'typing' }).catch(() => {}) }, 5000)
+    const killer = setTimeout(() => child.kill('SIGTERM'), 30 * 60000)
+    child.stdout.on('data', (d) => {
+      buf += d
+      let nl
+      while ((nl = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, nl); buf = buf.slice(nl + 1)
+        let ev
+        try { ev = JSON.parse(line) } catch { continue }
+        if (ev.session_id && ev.session_id !== claudeState.session[chat]) { claudeState.session[chat] = ev.session_id; saveClaude() }
+        if (ev.type === 'assistant') for (const b of ev.message?.content ?? []) if (b.type === 'tool_use') pending.push(toolLine(b))
+        if (ev.type === 'result') result = ev
+      }
+    })
+    child.stderr.on('data', (d) => { err += d })
+    return new Promise((resolve) => {
+      child.on('close', (code) => {
+        clearInterval(ticker); clearTimeout(killer); claudeRuns.delete(chat)
+        flush(true)
+        claudeState.last[chat] = { ms: Date.now() - t, turns: result?.num_turns, cost: result?.total_cost_usd, code }
+        saveClaude()
+        let reply = result?.result?.trim() || (code === null ? 'Stopped.' : `Claude exited (${code}). ${err.trim().slice(-500)}`)
+        if (/not logged in|please run \/login|invalid api key|authentication/i.test(reply + err)) reply = 'Claude Code is not signed in yet (run claude auth login on the server).'
+        appendFileSync(LOG, `${new Date().toISOString()} chat=${chat} ${JSON.stringify({ claude: true, ...claudeState.last[chat] })}\n`)
+        if (existsSync(RESTART_FLAG)) {
+          unlinkSync(RESTART_FLAG)
+          reply += '\n(Restarting the bot to apply the changes, back in about 20 s.)'
+          setTimeout(() => process.exit(0), 3000)
+        }
+        resolve({ reply, ms: Date.now() - t, stats: { claude: claudeState.last[chat] } })
+      })
+    })
+  }
+
   // ---- OAuth sign-in (xAI device code) ----
   // dsh's authorization registry runs pi-ai's xAI flow and stores the token in
   // dsh's credential store, where the xai route reads (and refreshes) it. The
@@ -228,6 +296,9 @@ export function apply(ctx) {
     key: '/key NAME value = store an API key (your message is deleted)',
     restart: 'restart the bot to load new models or keys',
     login: '/login grok = sign in with your SuperGrok / X Premium account',
+    claude: 'talk to Claude Code (the maintainer); /claude message sends one message',
+    qwen: 'back to Qwen from /claude mode',
+    stop: 'cancel a running Claude job',
   }
   const NEW_CMD = ['new', 'start a fresh conversation']
   const menu = () => [...Object.entries(BUILTIN), ...Object.entries(customCommands()).map(([k, v]) => [k, v.desc]), NEW_CMD]
@@ -246,6 +317,7 @@ export function apply(ctx) {
   async function handle(chat, textIn) {
     const m = textIn.trim().match(/^\/([a-z0-9_]+)(?:@\w+)?\s*([\s\S]*)$/i)
     if (!m) {
+      if (claudeState.mode[chat]) return askClaude(chat, textIn)
       lastQuestion[chat] = textIn
       return ask(chat, textIn)
     }
@@ -256,8 +328,24 @@ export function apply(ctx) {
       case 'help':
         return { reply: menu().map(([k, v]) => `/${k} — ${v}`).join('\n') }
       case 'new':
+        if (claudeState.mode[chat]) {
+          delete claudeState.session[chat]; saveClaude()
+          return { reply: 'Fresh Claude conversation started.' }
+        }
         forget(chat)
         return { reply: 'Fresh conversation started.' }
+      case 'claude':
+        claudeState.mode[chat] = true; saveClaude()
+        return args ? askClaude(chat, args) : { reply: 'Claude Code mode: messages now go to Claude (it edits and tests the bot, and takes its time). /qwen to go back, /new for a fresh Claude conversation, /stop to cancel.' }
+      case 'qwen':
+        delete claudeState.mode[chat]; saveClaude()
+        return { reply: 'Back to Qwen.' }
+      case 'stop': {
+        const run = claudeRuns.get(chat)
+        if (!run) return { reply: 'Nothing running.' }
+        run.kill('SIGTERM')
+        return { reply: 'Stopping Claude...' }
+      }
       case 'continue': {
         const back = prevSession[chat]
         if (!back) return { reply: 'Nothing to go back to.' }
@@ -273,6 +361,10 @@ export function apply(ctx) {
         forget(chat)
         return ask(chat, lastQuestion[chat])
       case 'usage': {
+        if (claudeState.mode[chat]) {
+          const l = claudeState.last[chat]
+          return { reply: l ? `Last Claude run: ${Math.round(l.ms / 1000)} s, ${l.turns ?? '?'} turns${l.cost ? `, $${l.cost.toFixed(2)} (subscription usage)` : ''}.` : 'No Claude runs yet.' }
+        }
         const u = usage.get(chats[chat])
         return { reply: u ? `Last answer: ${u.steps} model calls, ${u.input} tokens in, ${u.output} out, tools: ${u.tools.join(', ') || 'none'}. Free tier allows ~7000 tokens in per minute.` : 'No answers yet in this conversation.' }
       }

@@ -23,6 +23,12 @@ startup. From Telegram: `/model` (list), `/model name` (switch), `/model add nam
 `/key NAME value` (stores an API key in `data/keys.env`, deletes your message), `/restart` (Docker brings it back), `/login grok` (xAI device-code sign-in with a SuperGrok / X Premium account: the bot sends a link + code, the token is stored in dsh's credential store, Grok is added with `auth: oauth` and self-editing turns are routed to it), `/logout grok`.
 The bot can do the same by being asked (tools `models`, `make_command`).
 
+## Claude Code (maintainer mode)
+`/claude` sends your messages to Claude Code running in the bot folder (it reads `CLAUDE.md`): it edits
+prompts, tools and plugins, tests Qwen through the local endpoint and commits to the local git history.
+`/qwen` goes back, `/stop` cancels, `/new` starts a fresh Claude conversation. Sign in once on the server:
+`docker exec -it groqbot claude auth login` (opens a link, you paste the code back).
+
 ## Chat commands
 `/continue` back to the previous chat · `/retry` last question in a fresh chat · `/usage` tokens of last answer · `/help` · `/commands` · `/new` fresh chat (kept last in the menu).
 Make your own: `/cmd weekend weekend weather and one fun thing to do {args}` -> `/weekend with kids`. Delete: `/cmd weekend`. Stored in `agent/commands/<name>.md`.
@@ -47,9 +53,7 @@ Make your own: `/cmd weekend weekend weather and one fun thing to do {args}` -> 
 Without the compose plugin (plain Docker):
 
     docker build -t groqbot .
-    docker run -d --name groqbot --restart unless-stopped \
-      -v $PWD/.env:/app/.env:ro -v $PWD/agent:/app/agent \
-      -v $PWD/data:/app/data -v $PWD/dsh-home:/app/dsh-home groqbot
+    docker run -d --name groqbot --restart unless-stopped -v $PWD:/app groqbot
     docker logs -f groqbot      # watch it
     docker restart groqbot      # after editing prompt.md / plugins
 

@@ -36,6 +36,17 @@ const WX = { 1000: 'clear', 1100: 'mostly clear', 1101: 'partly cloudy', 1102: '
   5000: 'snow', 5001: 'flurries', 5100: 'light snow', 5101: 'heavy snow', 6000: 'freezing drizzle',
   6001: 'freezing rain', 7000: 'ice pellets', 8000: 'thunderstorm' }
 
+// Sun/moon from the US Naval Observatory (per local day; tomorrow.io's moon
+// times were off by 10-80 min and sometimes missing). Times come back in the
+// offset we pass, so DST is resolved per date.
+async function sky(c, date) {
+  const off = new Date(`${date}T12:00:00Z`).toLocaleString('en-US', { timeZone: TZ, timeZoneName: 'shortOffset' }).match(/GMT([+-]\d+)/)?.[1] ?? '0'
+  const d = (await getJson(`https://aa.usno.navy.mil/api/rstt/oneday?date=${date}&coords=${c.lat.toFixed(4)},${c.lon.toFixed(4)}&tz=${off}&dst=false`)).properties.data
+  const t12 = (hm) => { if (!hm) return 'none'; const [h, m] = hm.split(':').map(Number); return `${h % 12 || 12}:${String(m).padStart(2, '0')} ${h < 12 ? 'AM' : 'PM'}` }
+  const pick = (list, phen) => t12(list.find((x) => x.phen === phen)?.time)
+  return `sun ${pick(d.sundata, 'Rise')}-${pick(d.sundata, 'Set')}, moonrise ${pick(d.moondata, 'Rise')}, moonset ${pick(d.moondata, 'Set')}, moon ${d.fracillum ?? '?'} ${d.curphase ?? ''}`.trim()
+}
+
 async function weather({ location, days }) {
   const key = process.env.TOMORROW_API_KEY
   if (!key) return 'TOMORROW_API_KEY not set.'
@@ -45,12 +56,21 @@ async function weather({ location, days }) {
   const now = d.timelines.hourly[0].values
   const lines = [c.name.split(',').slice(0, 3).join(','),
     `Now: ${Math.round(now.temperature)}F (feels ${Math.round(now.temperatureApparent)}F), ${WX[now.weatherCode] ?? now.weatherCode}, wind ${Math.round(now.windSpeed)} mph, rain chance ${now.precipitationProbability}%`]
-  for (const day of d.timelines.daily.slice(0, n)) {
+  // Label days relative to the local date and drop any already over: early in
+  // the morning tomorrow.io still lists yesterday first, and Qwen picked the
+  // wrong row for "tonight" when days were bare dates.
+  const ymd = (date) => date.toLocaleDateString('en-CA', { timeZone: TZ })
+  const today = ymd(new Date())
+  const tomorrow = ymd(new Date(Date.now() + 86400000))
+  const rows = d.timelines.daily.filter((x) => x.time.slice(0, 10) >= today).slice(0, n)
+  const skies = await Promise.all(rows.map((day) => sky(c, day.time.slice(0, 10)).catch(() => 'sun/moon times unavailable')))
+  rows.forEach((day, i) => {
     const v = day.values
-    const at = (iso) => iso ? new Date(iso).toLocaleTimeString('en-US', { timeZone: TZ, hour: 'numeric', minute: '2-digit' }) : '?'
-    lines.push(`${day.time.slice(0, 10)}: ${Math.round(v.temperatureMin)}-${Math.round(v.temperatureMax)}F, ${WX[v.weatherCodeMax] ?? v.weatherCodeMax}, rain ${v.precipitationProbabilityMax}%`
-      + ` | sun ${at(v.sunriseTime)}-${at(v.sunsetTime)}, moonrise ${at(v.moonriseTime)}, moonset ${at(v.moonsetTime)}`)
-  }
+    const date = day.time.slice(0, 10)
+    const weekday = new Date(`${date}T12:00:00Z`).toLocaleDateString('en-US', { timeZone: 'UTC', weekday: 'short', month: 'short', day: 'numeric' })
+    const label = date === today ? `Today (${weekday})` : date === tomorrow ? `Tomorrow (${weekday})` : weekday
+    lines.push(`${label}: ${Math.round(v.temperatureMin)}-${Math.round(v.temperatureMax)}F, ${WX[v.weatherCodeMax] ?? v.weatherCodeMax}, rain ${v.precipitationProbabilityMax}% | ${skies[i]}`)
+  })
   return lines.join('\n')
 }
 
@@ -358,7 +378,7 @@ export async function apply(ctx) {
   // Same files as the /cmd chat command; the bridge watches the folder and
   // refreshes Telegram's "/" menu, so commands can be made just by asking.
   const CMD_DIR = join(AGENT, 'commands')
-  const RESERVED = new Set(['start', 'help', 'new', 'continue', 'retry', 'usage', 'commands', 'cmd', 'model', 'key', 'restart', 'login', 'logout'])
+  const RESERVED = new Set(['start', 'help', 'new', 'continue', 'retry', 'usage', 'commands', 'cmd', 'model', 'key', 'restart', 'login', 'logout', 'claude', 'qwen', 'stop'])
   reg({
     name: 'make_command',
     description: 'Create, replace, or delete (empty prompt) a /slash command for the user. prompt = what the command asks you to do; {args} = text typed after it.',
